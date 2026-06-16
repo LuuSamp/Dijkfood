@@ -283,15 +283,15 @@ def create_alb_only(
     return alb_arn, dns
 
 
-def create_target_group(
-    elbv2,
-    vpc_id: str,
-    suffix: str,
+def _target_group_name(suffix: str, service_id: str) -> str:
+    return f"dftg{suffix}-{service_id}"[:32]
+
+
+def _target_group_health_settings(
     service_id: str,
     *,
     health_check_path: str | None = None,
-) -> str:
-    tg_name = f"dftg{suffix}-{service_id}"[:32]
+) -> tuple[str, int, int, int]:
     if health_check_path is not None:
         health_path = health_check_path
     elif service_id == "routing":
@@ -305,6 +305,46 @@ def create_target_group(
     interval_s = 60 if service_id == "routing" else 30
     healthy_n = 2
     unhealthy_n = 10 if service_id == "routing" else 5
+    return health_path, interval_s, healthy_n, unhealthy_n
+
+
+def ensure_target_group(
+    elbv2,
+    vpc_id: str,
+    suffix: str,
+    service_id: str,
+    *,
+    health_check_path: str | None = None,
+) -> str:
+    """Create or reuse a target group, updating health-check settings when they change."""
+    tg_name = _target_group_name(suffix, service_id)
+    health_path, interval_s, healthy_n, unhealthy_n = _target_group_health_settings(
+        service_id,
+        health_check_path=health_check_path,
+    )
+    try:
+        existing = elbv2.describe_target_groups(Names=[tg_name])["TargetGroups"]
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "TargetGroupNotFound":
+            raise
+        existing = []
+
+    if existing:
+        tg_arn = existing[0]["TargetGroupArn"]
+        if existing[0].get("VpcId") != vpc_id:
+            raise RuntimeError(
+                f"Target group {tg_name} exists in VPC {existing[0].get('VpcId')}, expected {vpc_id}"
+            )
+        elbv2.modify_target_group(
+            TargetGroupArn=tg_arn,
+            HealthCheckPath=health_path,
+            HealthCheckIntervalSeconds=interval_s,
+            HealthyThresholdCount=healthy_n,
+            UnhealthyThresholdCount=unhealthy_n,
+        )
+        print(f"  [ALB] Reusing target group {tg_name} (health check {health_path})")
+        return tg_arn
+
     tg = elbv2.create_target_group(
         Name=tg_name,
         Protocol="HTTP",
@@ -319,7 +359,25 @@ def create_target_group(
         UnhealthyThresholdCount=unhealthy_n,
         Tags=_tags(suffix),
     )
+    print(f"  [ALB] Created target group {tg_name}")
     return tg["TargetGroups"][0]["TargetGroupArn"]
+
+
+def create_target_group(
+    elbv2,
+    vpc_id: str,
+    suffix: str,
+    service_id: str,
+    *,
+    health_check_path: str | None = None,
+) -> str:
+    return ensure_target_group(
+        elbv2,
+        vpc_id,
+        suffix,
+        service_id,
+        health_check_path=health_check_path,
+    )
 
 
 def register_fargate_task_definition(

@@ -128,9 +128,17 @@ def load_events() -> pd.DataFrame:
                 return normalized
         except Exception as e:
             err = str(e)
-            if "TABLE_NOT_FOUND" in err or "EntityNotFoundException" in err:
+            if any(
+                token in err
+                for token in (
+                    "TABLE_NOT_FOUND",
+                    "EntityNotFoundException",
+                    "INVALID_TABLE_PROPERTY",
+                )
+            ):
                 st.warning(
-                    "Tabela Glue `events` ainda não disponível no Athena; lendo eventos diretamente do S3."
+                    "Tabela Glue `events` indisponível ou mal configurada no Athena; "
+                    "lendo eventos diretamente do S3."
                 )
             else:
                 st.error(f"Falha ao consultar Athena: {e}")

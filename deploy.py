@@ -111,7 +111,12 @@ from tools.analytics_infra import (
     enable_analytics_ingestion,
 )
 from tools.datalake_infra import create_datalake_bucket, destroy_datalake_bucket
-from tools.glue_infra import create_glue_catalog, destroy_glue_catalog, run_glue_crawler
+from tools.glue_infra import (
+    create_glue_catalog,
+    destroy_glue_catalog,
+    ensure_events_table,
+    run_glue_crawler,
+)
 from tools.prediction_deploy import (
     PREDICTION_SERVICE_ID,
     build_prediction_task_environment,
@@ -900,12 +905,20 @@ def _finalize_analytics(
         state=state,
         ordering_base_url=ordering_base_url,
     )
-    if state.glue_crawler_name:
+    if state.glue_crawler_name and state.glue_database and state.datalake_s3_bucket:
         glue = session.client("glue")
         try:
             run_glue_crawler(glue, state.glue_crawler_name, wait=False)
         except Exception as exc:
             print(f"[deploy] Glue crawler start skipped: {exc}")
+        try:
+            ensure_events_table(
+                glue,
+                db_name=state.glue_database,
+                datalake_bucket=state.datalake_s3_bucket,
+            )
+        except Exception as exc:
+            print(f"[deploy] Glue events table repair skipped: {exc}")
     if args.with_predictions and not state.sagemaker_delivery_endpoint:
         state.sagemaker_delivery_endpoint = (
             os.environ.get("SAGEMAKER_DELIVERY_ENDPOINT") or DEFAULT_DELIVERY_ENDPOINT

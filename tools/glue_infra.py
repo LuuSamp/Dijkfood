@@ -19,65 +19,70 @@ def glue_crawler_name(suffix: str) -> str:
     return f"dijkfood-events-crawler-{suffix}".lower()
 
 
-def ensure_events_table(glue, *, db_name: str, datalake_bucket: str) -> str:
-    """Create the Athena/Glue `events` table if the crawler has not registered one yet."""
-    table_name = "events"
+def _events_table_input(datalake_bucket: str, table_name: str = "events") -> dict:
+    """Glue/Athena table for JSONL under events/YYYY/MM/DD/ (partition_0/1/2)."""
     s3_target = f"s3://{datalake_bucket}/events/"
+    return {
+        "Name": table_name,
+        "Description": "Operational events (order status, courier positions) from datalake JSONL",
+        "TableType": "EXTERNAL_TABLE",
+        "Parameters": {
+            "classification": "json",
+            "projection.enabled": "true",
+            "projection.partition_0.type": "integer",
+            "projection.partition_0.range": "2024,2035",
+            "projection.partition_1.type": "integer",
+            "projection.partition_1.range": "1,12",
+            "projection.partition_1.digits": "2",
+            "projection.partition_2.type": "integer",
+            "projection.partition_2.range": "1,31",
+            "projection.partition_2.digits": "2",
+            "storage.location.template": (
+                f"s3://{datalake_bucket}/events/${{partition_0}}/${{partition_1}}/${{partition_2}}"
+            ),
+        },
+        "PartitionKeys": [
+            {"Name": "partition_0", "Type": "string"},
+            {"Name": "partition_1", "Type": "string"},
+            {"Name": "partition_2", "Type": "string"},
+        ],
+        "StorageDescriptor": {
+            "Location": s3_target,
+            "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
+            "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+            "SerdeInfo": {
+                "SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe",
+                "Parameters": {"ignore.malformed.json": "true"},
+            },
+            "Columns": [
+                {"Name": "type", "Type": "string"},
+                {"Name": "order_id", "Type": "bigint"},
+                {"Name": "status_id", "Type": "int"},
+                {"Name": "timestamp", "Type": "string"},
+                {"Name": "detail", "Type": "string"},
+                {"Name": "food_place_id", "Type": "bigint"},
+                {"Name": "customer_id", "Type": "bigint"},
+                {"Name": "courier_id", "Type": "bigint"},
+                {"Name": "lat", "Type": "double"},
+                {"Name": "lon", "Type": "double"},
+            ],
+        },
+    }
+
+
+def ensure_events_table(glue, *, db_name: str, datalake_bucket: str) -> str:
+    """Create or repair the Athena/Glue `events` table (idempotent upsert)."""
+    table_name = "events"
+    table_input = _events_table_input(datalake_bucket, table_name)
     try:
         glue.get_table(DatabaseName=db_name, Name=table_name)
-        return table_name
+        glue.update_table(DatabaseName=db_name, TableInput=table_input)
+        print(f"  [Glue] Updated table {db_name}.{table_name}")
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "EntityNotFoundException":
             raise
-
-    glue.create_table(
-        DatabaseName=db_name,
-        TableInput={
-            "Name": table_name,
-            "Description": "Operational events (order status, courier positions) from datalake JSONL",
-            "TableType": "EXTERNAL_TABLE",
-            "Parameters": {
-                "classification": "json",
-                "projection.enabled": "true",
-                "projection.year.type": "integer",
-                "projection.year.range": "2024,2035",
-                "projection.month.type": "integer",
-                "projection.month.range": "1,12",
-                "projection.month.digits": "2",
-                "projection.day.type": "integer",
-                "projection.day.range": "1,31",
-                "projection.day.digits": "2",
-                "storage.location.template": f"s3://{datalake_bucket}/events/${{year}}/${{month}}/${{day}}",
-            },
-            "PartitionKeys": [
-                {"Name": "year", "Type": "string"},
-                {"Name": "month", "Type": "string"},
-                {"Name": "day", "Type": "string"},
-            ],
-            "StorageDescriptor": {
-                "Location": s3_target,
-                "InputFormat": "org.apache.hadoop.mapred.TextInputFormat",
-                "OutputFormat": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
-                "SerdeInfo": {
-                    "SerializationLibrary": "org.openx.data.jsonserde.JsonSerDe",
-                    "Parameters": {"ignore.malformed.json": "true"},
-                },
-                "Columns": [
-                    {"Name": "type", "Type": "string"},
-                    {"Name": "order_id", "Type": "bigint"},
-                    {"Name": "status_id", "Type": "int"},
-                    {"Name": "timestamp", "Type": "string"},
-                    {"Name": "detail", "Type": "string"},
-                    {"Name": "food_place_id", "Type": "bigint"},
-                    {"Name": "customer_id", "Type": "bigint"},
-                    {"Name": "courier_id", "Type": "bigint"},
-                    {"Name": "lat", "Type": "double"},
-                    {"Name": "lon", "Type": "double"},
-                ],
-            },
-        },
-    )
-    print(f"  [Glue] Table {db_name}.{table_name}")
+        glue.create_table(DatabaseName=db_name, TableInput=table_input)
+        print(f"  [Glue] Created table {db_name}.{table_name}")
     return table_name
 
 

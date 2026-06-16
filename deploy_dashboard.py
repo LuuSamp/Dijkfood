@@ -43,6 +43,7 @@ from tools.ecs_infra import (
     wait_for_service_stable,
 )
 from tools.rds_infra import get_default_subnet_ids, get_default_vpc_id
+from tools.state import EcsServiceRecord
 
 SERVICE_ID = "dashboard"
 PRIMARY_RULE_PRIORITY = 6
@@ -53,7 +54,7 @@ EXTRA_PATH_RULES: list[tuple[int, str]] = [
     (9, "/favicon.png"),
     (10, "/manifest.json"),
 ]
-HEALTH_CHECK_PATH = "/_stcore/health"
+HEALTH_CHECK_PATH = "/dashboard/_stcore/health"
 
 
 def _matching_rule_arn(elbv2, listener_arn: str, path_pattern: str) -> str | None:
@@ -112,8 +113,34 @@ def _upsert_listener_rule(
     return rule_arn
 
 
-def _find_service_record(state) -> object | None:
+def _find_service_record(state) -> EcsServiceRecord | None:
     return next((r for r in state.ecs_services if r.service_id == SERVICE_ID), None)
+
+
+def _upsert_service_record(
+    state,
+    *,
+    service_name: str,
+    repo_name: str,
+    family: str,
+    tg_arn: str,
+    log_group: str,
+) -> None:
+    rec = _find_service_record(state)
+    if rec:
+        if not rec.target_group_arn:
+            rec.target_group_arn = tg_arn
+        return
+    state.ecs_services.append(
+        EcsServiceRecord(
+            service_id=SERVICE_ID,
+            service_name=service_name,
+            ecr_repo_name=repo_name,
+            task_definition_family=family,
+            target_group_arn=tg_arn,
+            log_group_name=log_group,
+        )
+    )
 
 
 def _teardown_dashboard(*, ecs, elbv2, state, suffix: str) -> None:
@@ -317,6 +344,14 @@ def deploy_dashboard(*, desired_count: int = 1, teardown: bool = False) -> None:
             create_cluster_if_needed=False,
         )
 
+    _upsert_service_record(
+        state,
+        service_name=service_name,
+        repo_name=repo_name,
+        family=family,
+        tg_arn=tg_arn,
+        log_group=log_group,
+    )
     wait_for_service_stable(ecs, state.cluster_name, service_name)
     write_connection_env(state, bu, region, quiet=True)
     print(f"[dashboard] Wrote {CONNECTION_ENV_PATH}")

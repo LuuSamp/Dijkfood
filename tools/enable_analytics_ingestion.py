@@ -51,14 +51,14 @@ def main() -> None:
         ordering_base_url=ordering_base_url,
     )
     glue = session.client("glue")
+    if state.glue_crawler_name:
+        run_glue_crawler(glue, state.glue_crawler_name, wait=False)
     if state.glue_database and state.datalake_s3_bucket:
         ensure_events_table(
             glue,
             db_name=state.glue_database,
             datalake_bucket=state.datalake_s3_bucket,
         )
-    if state.glue_crawler_name:
-        run_glue_crawler(glue, state.glue_crawler_name, wait=False)
     print("Analytics ingestion enabled.")
 
 
