@@ -1,4 +1,4 @@
-# DijkFood (cloud_comp_a1)
+# DijkFood
 
 Automated AWS deployment for the cloud computing assignment: **RDS (PostgreSQL)** for core entities, **DynamoDB** for order logs, courier positions, and routes, **ECR/ECS Fargate microservices** behind one **ALB** (path-based routing) on the **Learner Lab** account, optional load simulators, **analytics datalake + SageMaker ML**, a **prediction gateway**, **Streamlit dashboard**, **Bedrock conversational agent**, and teardown.
 
@@ -11,7 +11,6 @@ Automated AWS deployment for the cloud computing assignment: **RDS (PostgreSQL)*
 ## Setup
 
 ```bash
-cd cloud_comp_a1
 pip install -r requirements-deploy.txt
 cp env.example .env   # edit ACCOUNT_ID and IAM role ARNs for your learner lab
 ```
