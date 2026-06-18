@@ -7,7 +7,7 @@ Chat UI for the [agent API](../agent/README.md).
 After lab deploy with the agent (`python deploy.py --skip-teardown --with-agent`), publish the UI on the **same lab ALB**:
 
 ```bash
-python deploy_agent_ui.py
+python deploy.py agent-ui
 ```
 
 Open the URL printed at the end (stored as `AGENT_UI_URL` in `connection.env`), e.g.:
@@ -19,13 +19,13 @@ The page uses the **same origin** as the agent API (`/agent/...`), so you do not
 Redeploy UI only after changes (required if chat/monitor feels static — usually a stale image missing `api.js`):
 
 ```bash
-python deploy_agent_ui.py
+python deploy.py agent-ui
 ```
 
 Remove UI resources:
 
 ```bash
-python deploy_agent_ui.py --teardown
+python deploy.py agent-ui --teardown
 ```
 
 **Requires:** `connection.env` from `deploy.py --with-agent`.

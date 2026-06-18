@@ -40,19 +40,19 @@ Route polling treats `HTTP 503` as transient during readiness/load transitions a
 
 ## ECS Deploy / Lifecycle
 
-Use `deploy_simulation.py` for independent service lifecycle control:
+Use `deploy.py sim` for independent service lifecycle control:
 
 ```bash
-python deploy_simulation.py --service customer --action deploy
-python deploy_simulation.py --service food_place --action deploy
-python deploy_simulation.py --service courier --action deploy
+python deploy.py sim --service customer --action deploy
+python deploy.py sim --service food_place --action deploy
+python deploy.py sim --service courier --action deploy
 ```
 
 Control services without tearing down the core stack:
 
 ```bash
-python deploy_simulation.py --service courier --action stop
-python deploy_simulation.py --service courier --action start --desired-count 1
-python deploy_simulation.py --service courier --action shutdown
-python deploy_simulation.py --service courier --action status
+python deploy.py sim --service courier --action stop
+python deploy.py sim --service courier --action start --desired-count 1
+python deploy.py sim --service courier --action shutdown
+python deploy.py sim --service courier --action status
 ```

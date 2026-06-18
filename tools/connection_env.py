@@ -48,7 +48,21 @@ K_SAGEMAKER_ANOMALY_MODEL = "SAGEMAKER_ANOMALY_MODEL_NAME"
 K_AGENT_UI_TG_ARN = "AGENT_UI_TARGET_GROUP_ARN"
 K_AGENT_UI_RULE_ARN = "AGENT_UI_LISTENER_RULE_ARN"
 K_AGENT_UI_URL = "AGENT_UI_URL"
-K_SG_EXTRA = "CREATED_SECURITY_GROUP_IDS"
+
+_CONNECTION_DYNAMO_ALIASES = {
+    "DYNAMODB_ORDER_LOGS_TABLE": "DYNAMO_ORDER_LOGS_TABLE",
+    "DYNAMODB_COURIER_POSITIONS_TABLE": "DYNAMO_COURIER_POSITIONS_TABLE",
+    "DYNAMODB_ROUTES_TABLE": "DYNAMO_ROUTES_TABLE",
+    "DYNAMODB_AGENT_SESSIONS_TABLE": "DYNAMO_AGENT_SESSIONS_TABLE",
+    "DYNAMODB_PREDICTIONS_TABLE": "DYNAMO_PREDICTIONS_TABLE",
+}
+
+
+def apply_connection_env_aliases() -> None:
+    """Map deploy-snapshot DYNAMO_* keys to runtime DYNAMODB_* names."""
+    for target, source in _CONNECTION_DYNAMO_ALIASES.items():
+        if not os.getenv(target) and os.getenv(source):
+            os.environ[target] = os.environ[source]
 
 
 def write_connection_env(
@@ -102,8 +116,6 @@ def write_connection_env(
             separators=(",", ":"),
         )
         lines.append(f"{K_ECS_SERVICES_JSON}={payload}")
-    if state.created_sg_ids:
-        lines.append(f"{K_SG_EXTRA}={','.join(state.created_sg_ids)}")
     lines.append("")
     CONNECTION_ENV_PATH.write_text("\n".join(lines), encoding="utf-8")
     if not quiet:
@@ -150,6 +162,7 @@ def load_connection_env(
         raise FileNotFoundError(f"Missing {p}; run deploy with --skip-teardown first.")
 
     load_dotenv(p, override=True)
+    apply_connection_env_aliases()
 
     def req(key: str) -> str:
         val = (os.getenv(key) or "").strip()
@@ -216,11 +229,5 @@ def load_connection_env(
                 state.ecs_services.append(EcsServiceRecord(**item))
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"{p}: invalid {K_ECS_SERVICES_JSON}: {e}") from e
-    extra = (os.getenv(K_SG_EXTRA) or "").strip()
-    if extra:
-        for sg in extra.split(","):
-            sg = sg.strip()
-            if sg:
-                state.note_sg(sg)
 
     return state, region, base_url

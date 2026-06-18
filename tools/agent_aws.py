@@ -73,9 +73,6 @@ def load_agent_dotenv(project_root: Path | None = None) -> None:
             continue
         if val:
             os.environ.setdefault(key, val)
-    from tools.agent_roles_env import load_agent_roles_dotenv
-
-    load_agent_roles_dotenv(root)
 
 
 def agent_boto_session(

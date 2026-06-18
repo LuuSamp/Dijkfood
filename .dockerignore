@@ -24,7 +24,6 @@ htmlcov
 # Secrets and deploy snapshots
 .env
 connection.env
-agent_connection.env
 .env.agent
 *.pem
 
@@ -33,12 +32,12 @@ agent_connection.env
 **/*.graphml
 
 # Simulator images COPY simulator/requirements.txt and simulator/
-# Keep simulator in build context for deploy_simulation.py builds.
+# Keep simulator in build context for deploy.py sim builds.
 tools/
-download_graph_local.py
 deploy.py
 requirements-deploy.txt
 env.example
+scripts/
 
 # Other ECS services: not needed when context is repo root for ordering/tracking
 services/routing/
@@ -46,8 +45,8 @@ services/routing/
 # Docs and local state
 *.md
 *.pdf
-erdplus.png
-dijkfood_sim_state.json
+docs/
+simulator/.state/
 
 # IDE / OS
 .cursor

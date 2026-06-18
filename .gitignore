@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-download_graph_local.py
+
 # Distribution / packaging
 .Python
 build/
@@ -28,7 +28,7 @@ MANIFEST
 
 *.graphml
 
-dijkfood_sim_state.json
+simulator/.state/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -141,9 +141,7 @@ celerybeat.pid
 # Environments
 .env
 .env.agent
-agent_roles.env
 connection.env
-agent_connection.env
 .envrc
 .venv
 env/

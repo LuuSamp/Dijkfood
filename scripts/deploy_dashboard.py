@@ -6,9 +6,9 @@ publishes the dashboard at:
   {BASE_URL}/dashboard/
 
 Examples:
-  python deploy_dashboard.py
-  python deploy_dashboard.py --desired-count 2
-  python deploy_dashboard.py --teardown
+  python deploy.py dashboard
+  python deploy.py dashboard --desired-count 2
+  python deploy.py dashboard --teardown
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 

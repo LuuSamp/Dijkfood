@@ -7,19 +7,18 @@ Uses connection.env from `python deploy.py --with-agent`. Serves the UI at:
 The UI calls the agent API on the same ALB origin (/agent/...), so no CORS setup is required.
 
 Examples:
-  python deploy_agent_ui.py
-  python deploy_agent_ui.py --teardown
-  python deploy_agent_ui.py --desired-count 2
+  python deploy.py agent-ui
+  python deploy.py agent-ui --teardown
+  python deploy.py agent-ui --desired-count 2
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -125,7 +124,7 @@ def _teardown_agent_ui(
     if tg_arn:
         try:
             elbv2.delete_target_group(TargetGroupArn=tg_arn)
-            print(f"  [ALB] Deleted target group")
+            print("  [ALB] Deleted target group")
         except ClientError as exc:
             print(f"  [ALB] TG delete: {exc.response['Error']['Code']}")
 

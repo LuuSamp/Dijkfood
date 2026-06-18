@@ -57,7 +57,7 @@ Per-request token counts in `POST /v1/chat` still come from the Converse respons
 
 | Mode | Setup |
 |------|--------|
-| **Deployed UI (no CORS)** | `python deploy_agent_ui.py` → `{BASE_URL}/ui/` and `/ui/monitor.html` |
+| **Deployed UI (no CORS)** | `python deploy.py agent-ui` → `{BASE_URL}/ui/` and `/ui/monitor.html` |
 | **Local UI → lab agent** | `AGENT_CORS_ORIGINS` in `.env.agent`, then `python deploy.py --service agent` |
 
 ## Local run (developer)

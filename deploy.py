@@ -26,6 +26,10 @@ Usage:
   python deploy.py --service agent   # redeploy agent only (requires prior --with-agent deploy)
   python deploy.py --service prediction   # redeploy prediction service only
 
+  python deploy.py dashboard [--teardown] [--desired-count N]
+  python deploy.py agent-ui [--teardown] [--desired-count N]
+  python deploy.py sim --service customer|food_place|courier|all --action deploy|stop|start|shutdown|status
+
   Single-service redeploy uses connection.env (run a full deploy with --skip-teardown first).
   Ordering/tracking redeploy: DIJKFOOD_DB_PASSWORD is optional if the service already runs with
   DB_PASSWORD in ECS — the script reuses that value for the new task definition (no RDS changes).
@@ -1091,7 +1095,99 @@ def main() -> None:
             "Set SAGEMAKER_DELIVERY_ENDPOINT in connection.env after training."
         ),
     )
+
+    subparsers = parser.add_subparsers(dest="command", metavar="SUBCOMMAND")
+
+    dashboard_p = subparsers.add_parser(
+        "dashboard",
+        help="Deploy Streamlit analytics dashboard to existing ALB",
+    )
+    dashboard_p.add_argument(
+        "--teardown",
+        action="store_true",
+        help="Remove dashboard ECS service, ALB rules, and target group",
+    )
+    dashboard_p.add_argument(
+        "--desired-count",
+        type=int,
+        default=1,
+        help="Fargate task count (default 1)",
+    )
+
+    agent_ui_p = subparsers.add_parser(
+        "agent-ui",
+        help="Deploy static agent chat UI to existing ALB",
+    )
+    agent_ui_p.add_argument(
+        "--teardown",
+        action="store_true",
+        help="Remove agent-ui ECS service, ALB rule, and target group",
+    )
+    agent_ui_p.add_argument(
+        "--desired-count",
+        type=int,
+        default=1,
+        help="Fargate task count (default 1)",
+    )
+
+    from scripts.deploy_simulation import SIM_SPECS
+
+    sim_p = subparsers.add_parser(
+        "sim",
+        help="Deploy/control simulator ECS services",
+    )
+    sim_p.add_argument(
+        "--service",
+        required=True,
+        choices=sorted(SIM_SPECS.keys()) + ["all"],
+    )
+    sim_p.add_argument(
+        "--action",
+        default="deploy",
+        choices=["deploy", "stop", "start", "shutdown", "status"],
+        help="deploy/redeploy, stop, start, shutdown (delete), status",
+    )
+    sim_p.add_argument("--desired-count", type=int, default=None)
+    sim_p.add_argument("--cpu", default=None, help="Task CPU override (e.g. 256, 512)")
+    sim_p.add_argument("--memory", default=None, help="Task memory override (e.g. 512, 1024)")
+    sim_p.add_argument("--base-url", default=(os.environ.get("BASE_URL") or "").strip())
+    sim_p.add_argument(
+        "--tracking-base-url",
+        default=(os.environ.get("TRACKING_BASE_URL") or "").strip(),
+    )
+
     args = parser.parse_args()
+
+    if args.command == "dashboard":
+        if not args.teardown and args.desired_count < 1:
+            parser.error("--desired-count must be >= 1 unless --teardown")
+        from scripts.deploy_dashboard import deploy_dashboard
+
+        deploy_dashboard(desired_count=args.desired_count, teardown=args.teardown)
+        return
+
+    if args.command == "agent-ui":
+        if not args.teardown and args.desired_count < 1:
+            parser.error("--desired-count must be >= 1 unless --teardown")
+        from scripts.deploy_agent_ui import deploy_agent_ui
+
+        deploy_agent_ui(desired_count=args.desired_count, teardown=args.teardown)
+        return
+
+    if args.command == "sim":
+        from scripts.deploy_simulation import run_simulation
+
+        run_simulation(
+            service=args.service,
+            action=args.action,
+            desired_count=args.desired_count,
+            cpu=args.cpu,
+            memory=args.memory,
+            base_url=args.base_url or None,
+            tracking_base_url=args.tracking_base_url or None,
+        )
+        return
+
     if args.with_predictions:
         args.with_analytics = True
 

@@ -70,7 +70,7 @@ The **delivery-time** regressor uses `food_place_id`, `hour`, `weekday`, and **`
 ```bash
 cp .env.agent.example .env.agent   # credits-account API keys + BEDROCK_MODEL_ID
 python deploy.py --skip-teardown --with-agent   # lab stack + agent at /agent/*
-python deploy_agent_ui.py          # optional UI at {BASE_URL}/ui/
+python deploy.py agent-ui          # optional UI at {BASE_URL}/ui/
 python deploy.py --service agent   # redeploy agent image only
 ```
 
@@ -85,8 +85,8 @@ See [`agent/README.md`](agent/README.md) for the HTTP API and tool registry.
 Requires a prior deploy with **`--with-analytics`** (or `--with-predictions`):
 
 ```bash
-python deploy_dashboard.py              # {BASE_URL}/dashboard/
-python deploy_dashboard.py --teardown
+python deploy.py dashboard              # {BASE_URL}/dashboard/
+python deploy.py dashboard --teardown
 ```
 
 ### Simulation ECS services
@@ -94,10 +94,10 @@ python deploy_dashboard.py --teardown
 Run customer / food-place / courier simulators as separate ECS tasks (no ALB rules):
 
 ```bash
-python deploy_simulation.py --service customer --action deploy
-python deploy_simulation.py --service food_place --action start --desired-count 2
-python deploy_simulation.py --service courier --action stop
-python deploy_simulation.py --service customer --action shutdown
+python deploy.py sim --service customer --action deploy
+python deploy.py sim --service food_place --action start --desired-count 2
+python deploy.py sim --service courier --action stop
+python deploy.py sim --service customer --action shutdown
 ```
 
 ### Load tools (local CLI)
@@ -138,18 +138,18 @@ python -m simulator.orchestration.load_sim --base-url "http://<your-alb-dns>" --
 | `DATALAKE_S3_BUCKET`, `GLUE_DATABASE`, `GLUE_CRAWLER_NAME` | Analytics datalake (`--with-analytics`) |
 | `SAGEMAKER_DELIVERY_ENDPOINT`, `SAGEMAKER_DEMAND_MODEL_NAME`, `SAGEMAKER_ANOMALY_MODEL_NAME` | SageMaker artifacts / endpoint |
 | `ROUTING_GRAPH_S3_BUCKET` | S3 bucket for cached routing GraphML (teardown deletes bucket) |
-| `CREATED_SECURITY_GROUP_IDS` | Optional comma-separated list (extra SGs) |
+| `AGENT_UI_URL` | Agent chat UI URL after `deploy.py agent-ui` |
 
 ### Load tools reference
 
 Install once: `pip install -r simulator/requirements.txt` (Faker for the data loader). The load test expects **RDS + DynamoDB** schemas matching this repo (composite order logs, courier positions with `lat`/`lon`, etc.).
 
-Simulator commands load **[`.env`](.env)** first, then **[`connection.env`](connection.env)** if it exists ([`simulator/shared/env_load.py`](simulator/shared/env_load.py)). Duplicate keys keep the value from `.env` so you can override the deploy snapshot locally. **`BASE_URL`** from `connection.env` (written by `deploy.py`) is picked up automatically—no need to pass `--base-url` if it is set.
+Simulator commands load **[`.env`](.env)** first, then **[`connection.env`](connection.env)** if it exists ([`simulator/shared/env_load.py`](simulator/shared/env_load.py)). Duplicate keys keep the value from `.env` so you can override the deploy snapshot locally. **`DYNAMO_*`** keys in `connection.env` are aliased to **`DYNAMODB_*`** for local service runs. **`BASE_URL`** from `connection.env` (written by `deploy.py`) is picked up automatically—no need to pass `--base-url` if it is set.
 
 | Module | Purpose |
 |--------|---------|
 | [`simulator/orchestration/check_health.py`](simulator/orchestration/check_health.py) | `GET` ordering `/health`, routing `/routing/health` + `/routing/ready`, tracking `/tracking/health`. **`--strict-ready`** fails if the routing graph is not ready (503). |
-| [`simulator/loaders/data_loader.py`](simulator/loaders/data_loader.py) | **Faker**-backed **POST** of customers, food places, and **3×** couriers (configurable factor); **no orders**. Tries **`GET /routing/v1/random-points`** on `--routing-base-url` (defaults to `--base-url`), else São Paulo **bbox** fallback. Writes **`dijkfood_sim_state.json`** (override with `--state-file`). |
+| [`simulator/loaders/data_loader.py`](simulator/loaders/data_loader.py) | **Faker**-backed **POST** of customers, food places, and **3×** couriers (configurable factor); **no orders**. Tries **`GET /routing/v1/random-points`** on `--routing-base-url` (defaults to `--base-url`), else São Paulo **bbox** fallback. Writes **`simulator/.state/dijkfood_sim_state.json`** (override with `--state-file`). |
 | [`simulator/orchestration/load_test.py`](simulator/orchestration/load_test.py) | Service-mode orchestrator that runs customer/food_place/courier simulation loops together (API discovery via GET; no runtime state-file dependency). |
 | [`simulator/orchestration/load_sim.py`](simulator/orchestration/load_sim.py) | Lightweight **GET** traffic (default `/health`). |
 | [`simulator/shared/http_client.py`](simulator/shared/http_client.py), [`simulator/loaders/sp_coords.py`](simulator/loaders/sp_coords.py), [`simulator/shared/scenarios.py`](simulator/shared/scenarios.py), [`simulator/shared/env_load.py`](simulator/shared/env_load.py) | Shared HTTP, coordinates, scenario steps, env loading. |
@@ -163,9 +163,9 @@ Simulator commands load **[`.env`](.env)** first, then **[`connection.env`](conn
 | routing | `/routing*` | [`services/routing/`](services/routing) | OSMnx street graph + Dijkstra shortest paths (`length` in meters) |
 | agent | `/agent*` | [`agent/`](agent) | Bedrock conversational agent (`--with-agent`) |
 | prediction | `/prediction*` | [`services/prediction/`](services/prediction) | SageMaker delivery endpoint + batch forecast reads (`--with-predictions`) |
-| dashboard | `/dashboard*` | [`dashboard/`](dashboard) | Streamlit analytics UI (`deploy_dashboard.py`) |
+| dashboard | `/dashboard*` | [`dashboard/`](dashboard) | Streamlit analytics UI (`deploy.py dashboard`) |
 
-## Data model (ERD; see `erdplus.png`)
+## Data model (ERD; see [`docs/erdplus.png`](docs/erdplus.png))
 
 ### RDS (PostgreSQL)
 
@@ -191,10 +191,8 @@ The **ordering** ECS task receives `DYNAMODB_ORDER_LOGS_TABLE`, `DYNAMODB_COURIE
 
 ## Layout
 
-- [`deploy.py`](deploy.py) — full pipeline, `--resume`, `--with-analytics`, `--with-predictions`, `--with-agent`, `--service`, and `--teardown-only`
-- [`deploy_dashboard.py`](deploy_dashboard.py) — Streamlit dashboard on the existing ALB
-- [`deploy_simulation.py`](deploy_simulation.py) — deploy/redeploy/start/stop/shutdown simulation ECS services independently
-- [`deploy_agent_ui.py`](deploy_agent_ui.py) — static agent chat UI at `/ui/`
+- [`deploy.py`](deploy.py) — full pipeline, `--resume`, `--with-analytics`, `--with-predictions`, `--with-agent`, `--service`, `--teardown-only`, and subcommands `dashboard`, `agent-ui`, `sim`
+- [`scripts/`](scripts/) — implementations for `deploy.py` auxiliary subcommands
 - [`tools/connection_env.py`](tools/connection_env.py) — read/write `connection.env`
 - [`tools/rds_infra.py`](tools/rds_infra.py) — RDS + `SCHEMA_STEPS` enum bootstrap
 - [`tools/dynamodb_infra.py`](tools/dynamodb_infra.py) — DynamoDB create/destroy + IAM policy attachment

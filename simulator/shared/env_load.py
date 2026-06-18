@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from tools.connection_env import apply_connection_env_aliases
+
 _SIMULATOR_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _SIMULATOR_ROOT.parent
 _CONNECTION_ENV = _REPO_ROOT / "connection.env"
@@ -21,3 +23,4 @@ def load_simulator_env() -> None:
     load_dotenv(_REPO_ROOT / ".env")
     if _CONNECTION_ENV.is_file():
         load_dotenv(_CONNECTION_ENV, override=False)
+        apply_connection_env_aliases()

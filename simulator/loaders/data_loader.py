@@ -4,7 +4,7 @@ Load RDS fixture data via public POST APIs (no orders).
   pip install -r simulator/requirements.txt
   python -m simulator.loaders.data_loader --base-url http://<alb> [--customers 10]
 
-Writes dijkfood_sim_state.json (or --state-file) for load_test.
+Writes simulator/.state/dijkfood_sim_state.json (or --state-file) for load_test.
 
 If the state file already exists, deletes tracked customers, food_places, couriers
 (and any orders referencing them) via API before inserting, so re-runs do not
@@ -174,7 +174,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=None, help="Faker / random seed")
     p.add_argument(
         "--state-file",
-        default="dijkfood_sim_state.json",
+        default="simulator/.state/dijkfood_sim_state.json",
         help="Output JSON for load_test",
     )
     args = p.parse_args()
@@ -333,6 +333,7 @@ def main() -> None:
             ],
         },
     }
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     print(
         f"[data_loader] wrote {out_path}: {n_c} customers, {n_c} food places, "
