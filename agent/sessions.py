@@ -13,6 +13,8 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from agent.bedrock_messages import sanitize_bedrock_messages, trim_bedrock_messages
+
 log = logging.getLogger(__name__)
 
 
@@ -72,11 +74,11 @@ def load_messages(conversation_id: str) -> list[dict[str, Any]]:
         messages = raw
     else:
         return []
-    return _json_safe(messages)
+    return sanitize_bedrock_messages(_json_safe(messages))
 
 
 def save_messages(conversation_id: str, messages: list[dict[str, Any]]) -> None:
-    trimmed = messages[-_max_messages() :]
+    trimmed = trim_bedrock_messages(messages, _max_messages())
     payload = json.dumps(trimmed, default=str)
     try:
         _table().put_item(

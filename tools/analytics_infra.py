@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -10,9 +11,11 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
+from tools.aws_retry import describe_dynamodb_table
 from tools.state import DeploymentState
 
 LAMBDA_NAME = "dijkfood-analytics-ingest"
+PREDICTIONS_TASK_POLICY_NAME = "dijkfood-predictions-dynamo"
 _TOOLS_ROOT = Path(__file__).resolve().parent
 
 
@@ -39,8 +42,8 @@ def create_predictions_table(ddb, suffix: str, state: DeploymentState) -> str:
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ResourceInUseException":
             raise
-        d = ddb.describe_table(TableName=name)
-        arn = d["Table"]["TableArn"]
+        d = describe_dynamodb_table(ddb, name)
+        arn = d["TableArn"]
         print(f"  [DynamoDB] Predictions table {name} exists")
     state.dynamo_predictions_table = name
     state.dynamo_predictions_arn = arn
@@ -60,19 +63,47 @@ def destroy_predictions_table(ddb, state: DeploymentState) -> None:
     state.dynamo_predictions_arn = None
 
 
+def attach_predictions_policy_to_task_role(
+    iam, task_role_name: str, predictions_arn: str
+) -> None:
+    doc = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "dynamodb:PutItem",
+                    "dynamodb:GetItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DescribeTable",
+                ],
+                "Resource": [predictions_arn, f"{predictions_arn}/index/*"],
+            }
+        ],
+    }
+    iam.put_role_policy(
+        RoleName=task_role_name,
+        PolicyName=PREDICTIONS_TASK_POLICY_NAME,
+        PolicyDocument=json.dumps(doc),
+    )
+    print(f"  [IAM] Attached {PREDICTIONS_TASK_POLICY_NAME} to {task_role_name}")
+
+
 def _ensure_stream_enabled(ddb, table_name: str) -> str:
-    desc = ddb.describe_table(TableName=table_name)["Table"]
+    desc = describe_dynamodb_table(ddb, table_name)
     if not desc.get("StreamSpecification", {}).get("StreamEnabled"):
         ddb.update_table(
             TableName=table_name,
             StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_AND_OLD_IMAGES"},
         )
-    for _ in range(20):
-        desc = ddb.describe_table(TableName=table_name)["Table"]
+    for attempt in range(20):
+        desc = describe_dynamodb_table(ddb, table_name)
         arn = desc.get("LatestStreamArn")
         if arn:
             return arn
-        time.sleep(2)
+        time.sleep(min(5.0, 2.0 + attempt * 0.25))
     raise RuntimeError(f"Stream ARN did not appear for table {table_name}")
 
 

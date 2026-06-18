@@ -66,6 +66,32 @@ def get_json(
     return r.status_code, body
 
 
+def post_json(
+    base: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+    timeout_s: float | None = None,
+) -> tuple[int, Any]:
+    """Return (status_code, parsed_json_or_text)."""
+    url = f"{base.rstrip('/')}{path}"
+    timeout = httpx.Timeout(
+        timeout_s or _DEFAULT_TIMEOUT_S,
+        connect=_CONNECT_TIMEOUT_S,
+    )
+    try:
+        r = _CLIENT.post(url, json=body or {}, timeout=timeout)
+    except httpx.TimeoutException:
+        return 0, {"detail": "timeout"}
+    except httpx.HTTPError as exc:
+        return 0, {"detail": str(exc)}
+    try:
+        parsed: Any = r.json()
+    except Exception:
+        parsed = r.text
+    return r.status_code, parsed
+
+
 def normalize_http_result(status_code: int, body: Any, *, tool: str) -> dict[str, Any]:
     if status_code == 0:
         err = body.get("detail", "timeout") if isinstance(body, dict) else "transport_error"

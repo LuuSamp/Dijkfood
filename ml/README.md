@@ -12,6 +12,18 @@ Predictive layer for Objective 3 (seminar theme: SageMaker).
 6. Copy `SAGEMAKER_DEMAND_MODEL_NAME` / `SAGEMAKER_ANOMALY_MODEL_NAME` from `ml.train` output into `connection.env` (optional — auto-discovers latest `model.tar.gz` under `ml/artifacts/`)
 7. Batch forecasts: `python -m ml.batch_predict` (SageMaker Batch Transform — same sklearn as training)
 
+### Delivery-time model features
+
+The delivery regressor uses `food_place_id`, `hour`, `weekday`, and **`distance_m`** (routing shortest-path meters, with haversine fallback). Predictions are triggered after route calculation on `POST /place-order` and stored in DynamoDB (`GET /prediction/v1/delivery-time/{order_id}`).
+
+After changing features, rebuild data and retrain:
+
+```bash
+python -m ml.prepare_datasets          # joins route distances from DynamoDB + RDS fallback
+python -m ml.train --deploy-delivery   # retrain SageMaker endpoint with distance_m
+python deploy.py --skip-teardown --resume --with-predictions
+```
+
 If you already trained with the old `1.2-1` framework, **retrain** after pulling these changes:
 
 ```bash
@@ -39,6 +51,7 @@ Key variables in `connection.env`:
 
 - `DATALAKE_S3_BUCKET`
 - `GLUE_DATABASE`
+- `DYNAMODB_ROUTES_TABLE` (for `prepare_datasets` distance enrichment)
 - `SAGEMAKER_DELIVERY_ENDPOINT`
 - `SAGEMAKER_DEMAND_MODEL_NAME` / `SAGEMAKER_ANOMALY_MODEL_NAME` (model artifact S3 URIs)
 

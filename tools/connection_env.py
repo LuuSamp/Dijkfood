@@ -111,6 +111,34 @@ def write_connection_env(
     return CONNECTION_ENV_PATH
 
 
+def validate_resume_connection_env(
+    state: DeploymentState,
+    *,
+    path: Path | None = None,
+) -> list[str]:
+    """Return human-readable problems that block --resume (empty list = OK)."""
+    p = path or CONNECTION_ENV_PATH
+    errors: list[str] = []
+    if not state.suffix:
+        errors.append(f"{p}: DEPLOYMENT_SUFFIX is required for --resume")
+    if state.rds_instance_id and not state.rds_sg_id:
+        errors.append(
+            f"{p}: RDS_SECURITY_GROUP_ID is required when RDS_INSTANCE_ID is set"
+        )
+    if state.cluster_name:
+        if not state.ecs_task_sg_id:
+            errors.append(
+                f"{p}: ECS_TASK_SECURITY_GROUP_ID is required when "
+                f"{K_CLUSTER} is set"
+            )
+        if not state.alb_arn and not state.listener_arn:
+            errors.append(
+                f"{p}: ALB_ARN or LISTENER_ARN is required when "
+                f"{K_CLUSTER} is set (partial deploy recovery)"
+            )
+    return errors
+
+
 def load_connection_env(
     path: Path | None = None,
     *,

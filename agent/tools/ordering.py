@@ -1,4 +1,4 @@
-"""Read-only ordering service tools."""
+"""Ordering service tools (read and place-order workflow)."""
 
 from __future__ import annotations
 
@@ -79,6 +79,30 @@ def _get_food_place(args: dict[str, Any]) -> dict[str, Any]:
         f"/food-places/{food_place_id}",
     )
     return http_client.normalize_http_result(status, body, tool="get_food_place")
+
+
+def _place_order(args: dict[str, Any]) -> dict[str, Any]:
+    customer_id = int(args["customer_id"])
+    food_place_id = int(args["food_place_id"])
+    order_status_id = int(args.get("order_status_id", 1))
+    payload = {
+        "customer_id": customer_id,
+        "food_place_id": food_place_id,
+        "order_status_id": order_status_id,
+    }
+    status, body = http_client.post_json(
+        http_client.ordering_base_url(),
+        "/place-order",
+        body=payload,
+    )
+    result = http_client.normalize_http_result(status, body, tool="place_order")
+    if result.get("ok"):
+        data = dict(body) if isinstance(body, dict) else {}
+        data.setdefault("customer_id", customer_id)
+        data.setdefault("food_place_id", food_place_id)
+        data.setdefault("order_status_id", order_status_id)
+        result["data"] = data
+    return result
 
 
 def register_ordering_tools() -> None:
@@ -182,5 +206,33 @@ def register_ordering_tools() -> None:
             service="ordering",
             status="beta",
             endpoint_ref="GET /food-places/{food_place_id}",
+        )
+    )
+    register_tool(
+        ToolSpec(
+            name="place_order",
+            description=(
+                "Place a new order for a customer at a food place. "
+                "Queues route calculation and returns order_id, customer_id, food_place_id, "
+                "order_status_id, and optional predicted_delivery_seconds."
+            ),
+            input_schema=object_schema(
+                {
+                    "customer_id": {"type": "integer", "description": "Customer placing the order"},
+                    "food_place_id": {
+                        "type": "integer",
+                        "description": "Restaurant / food place ID",
+                    },
+                    "order_status_id": {
+                        "type": "integer",
+                        "description": "Initial status (1=CONFIRMED, default 1; must be 1–3)",
+                    },
+                },
+                required=["customer_id", "food_place_id"],
+            ),
+            handler=_place_order,
+            service="ordering",
+            status="beta",
+            endpoint_ref="POST /place-order",
         )
     )

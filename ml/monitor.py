@@ -24,7 +24,11 @@ def _load_env() -> None:
 def run() -> dict[str, float]:
     _load_env()
     bucket = os.environ.get("DATALAKE_S3_BUCKET", "").strip()
-    table = os.environ.get("DYNAMO_PREDICTIONS_TABLE", "").strip()
+    table = (
+        os.environ.get("DYNAMODB_PREDICTIONS_TABLE")
+        or os.environ.get("DYNAMO_PREDICTIONS_TABLE")
+        or ""
+    ).strip()
     region = os.environ.get("AWS_REGION", "us-east-1")
     if not bucket or not table:
         return {"mae": 0.0, "samples": 0.0}

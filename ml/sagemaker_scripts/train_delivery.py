@@ -28,7 +28,7 @@ def predict_fn(input_data, model):
     else:
         rows = input_data
     X = pd.DataFrame(rows)
-    cols = ["food_place_id", "hour", "weekday"]
+    cols = ["food_place_id", "hour", "weekday", "distance_m"]
     for c in cols:
         if c not in X.columns:
             X[c] = 0
@@ -44,7 +44,7 @@ if __name__ == "__main__":
 
     train_path = os.path.join(args.train, "train.csv")
     df = pd.read_csv(train_path)
-    feature_cols = ["food_place_id", "hour", "weekday"]
+    feature_cols = ["food_place_id", "hour", "weekday", "distance_m"]
     X = df[feature_cols]
     y = df["delivery_seconds"]
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)

@@ -56,9 +56,12 @@ load_dotenv(_PROJECT_ROOT / ".env")
 import boto3
 from botocore.exceptions import ClientError
 
+from tools.aws_retry import BOTO_RETRY_CONFIG, describe_dynamodb_table
+
 from tools.connection_env import (
     CONNECTION_ENV_PATH,
     load_connection_env,
+    validate_resume_connection_env,
     write_connection_env,
 )
 from tools.dynamodb_infra import (
@@ -76,6 +79,8 @@ from tools.ecs_infra import (
     create_listener_and_rules,
     create_target_group,
     destroy_ecs_stack,
+    discover_ecs_service_records,
+    discover_target_groups_by_service_id,
     ensure_ecr_repository,
     ensure_execution_role,
     ensure_log_group,
@@ -83,6 +88,7 @@ from tools.ecs_infra import (
     ecs_service_exists,
     register_fargate_task_definition,
     resolve_container_cli,
+    synthesize_ecs_service_records,
     update_ecs_service_task_definition,
     wait_for_service_stable,
 )
@@ -105,6 +111,7 @@ from tools.agent_infra import (
     destroy_agent_sessions_table,
 )
 from tools.analytics_infra import (
+    attach_predictions_policy_to_task_role,
     create_predictions_table,
     destroy_analytics_lambda,
     destroy_predictions_table,
@@ -206,21 +213,90 @@ def _refresh_rds_endpoint(rds, state: DeploymentState) -> str:
 
 
 def _hydrate_dynamo_arns(ddb, state: DeploymentState) -> None:
-    if state.dynamo_order_logs_table:
-        t = ddb.describe_table(TableName=state.dynamo_order_logs_table)["Table"]
-        state.dynamo_order_logs_arn = t["TableArn"]
-    if state.dynamo_courier_positions_table:
-        t = ddb.describe_table(TableName=state.dynamo_courier_positions_table)["Table"]
-        state.dynamo_courier_positions_arn = t["TableArn"]
-    if state.dynamo_routes_table:
-        t = ddb.describe_table(TableName=state.dynamo_routes_table)["Table"]
-        state.dynamo_routes_arn = t["TableArn"]
-    if state.dynamo_agent_sessions_table:
-        t = ddb.describe_table(TableName=state.dynamo_agent_sessions_table)["Table"]
-        state.dynamo_agent_sessions_arn = t["TableArn"]
-    if state.dynamo_predictions_table:
-        t = ddb.describe_table(TableName=state.dynamo_predictions_table)["Table"]
-        state.dynamo_predictions_arn = t["TableArn"]
+    """Resolve DynamoDB table ARNs; skips tables already hydrated in this run."""
+    pairs = [
+        ("dynamo_order_logs_table", "dynamo_order_logs_arn"),
+        ("dynamo_courier_positions_table", "dynamo_courier_positions_arn"),
+        ("dynamo_routes_table", "dynamo_routes_arn"),
+        ("dynamo_agent_sessions_table", "dynamo_agent_sessions_arn"),
+        ("dynamo_predictions_table", "dynamo_predictions_arn"),
+    ]
+    for table_attr, arn_attr in pairs:
+        name = getattr(state, table_attr, None)
+        if not name or getattr(state, arn_attr, None):
+            continue
+        table = describe_dynamodb_table(ddb, name)
+        setattr(state, arn_attr, table["TableArn"])
+
+
+def _resume_ecs_on_existing_alb(state: DeploymentState, base_url: str = "") -> bool:
+    """True when connection.env has enough ALB/ECS metadata to rebuild without new networking."""
+    bu = (base_url or os.environ.get("BASE_URL") or "").strip()
+    return bool(
+        state.cluster_name
+        and state.ecs_task_sg_id
+        and (state.alb_arn or state.listener_arn)
+        and bu
+    )
+
+
+def _hydrate_ecs_services_for_resume(
+    *,
+    ecs,
+    elbv2,
+    ec2,
+    state: DeploymentState,
+    base_url: str,
+    service_ids: tuple[str, ...],
+    specs: list[dict[str, object]],
+) -> bool:
+    """
+    Fill state.ecs_services when ECS_SERVICES_JSON is missing from connection.env.
+    Returns True if any records were recovered or synthesized.
+    """
+    if state.ecs_services or not state.cluster_name:
+        return False
+
+    cluster = state.cluster_name
+    suffix = state.suffix
+    recovered = discover_ecs_service_records(
+        ecs, cluster_name=cluster, suffix=suffix
+    )
+    if recovered:
+        state.ecs_services = recovered
+        print(
+            f"[deploy] --resume: recovered {len(recovered)} ECS service record(s) "
+            f"from cluster {cluster}"
+        )
+        return True
+
+    if not _resume_ecs_on_existing_alb(state, base_url):
+        return False
+
+    vpc_id = get_default_vpc_id(ec2)
+    tg_map = discover_target_groups_by_service_id(
+        elbv2,
+        vpc_id=vpc_id,
+        suffix=suffix,
+        service_ids=service_ids,
+    )
+    if not tg_map:
+        return False
+
+    synthesized = synthesize_ecs_service_records(
+        suffix=suffix,
+        specs=specs,
+        target_group_arns=tg_map,
+    )
+    if not synthesized:
+        return False
+
+    state.ecs_services = synthesized
+    print(
+        f"[deploy] --resume: synthesized {len(synthesized)} ECS service record(s) "
+        f"from existing target groups (ECS services not yet running)"
+    )
+    return True
 
 
 BASE_SERVICE_IDS = ("ordering", "tracking", "routing")
@@ -592,7 +668,9 @@ def redeploy_single_service(
     call (no ECS service deletion or replace).
     """
     try:
-        state, region, base_url = load_connection_env()
+        state, region, base_url = load_connection_env(
+            require_ecs_services_when_cluster_set=False,
+        )
     except (FileNotFoundError, ValueError) as e:
         print(f"[deploy] ERROR: {e}")
         raise SystemExit(1) from e
@@ -600,10 +678,36 @@ def redeploy_single_service(
     if not state.cluster_name:
         print("[deploy] ERROR: connection.env missing ECS_CLUSTER_NAME")
         raise SystemExit(1)
+
+    specs = _service_specs(
+        project_root,
+        with_agent=(service_id == AGENT_SERVICE_ID),
+        with_predictions=(service_id == PREDICTION_SERVICE_ID),
+    )
+
+    session = boto3.Session(region_name=region)
+    _rc = BOTO_RETRY_CONFIG
+    sts = session.client("sts", config=_rc)
+    ecs = session.client("ecs", config=_rc)
+    elbv2 = session.client("elbv2", config=_rc)
+    ec2 = session.client("ec2", config=_rc)
+    if not state.ecs_services:
+        if _hydrate_ecs_services_for_resume(
+            ecs=ecs,
+            elbv2=elbv2,
+            ec2=ec2,
+            state=state,
+            base_url=base_url,
+            service_ids=tuple(str(s["id"]) for s in specs),
+            specs=specs,
+        ):
+            write_connection_env(state, base_url, region)
+
     rec = next((r for r in state.ecs_services if r.service_id == service_id), None)
     if not rec:
         print(
-            f"[deploy] ERROR: no ECS service record for {service_id!r} in ECS_SERVICES_JSON"
+            f"[deploy] ERROR: no ECS service record for {service_id!r} "
+            f"(ECS_SERVICES_JSON missing and AWS recovery failed)"
         )
         raise SystemExit(1)
     exec_arn = state.execution_role_arn or (os.environ.get("EXECUTION_ROLE_ARN") or "").strip()
@@ -626,23 +730,15 @@ def redeploy_single_service(
         restore_lab_credentials_for_deploy(project_root)
         require_bedrock_credentials(project_root)
 
-    specs = _service_specs(
-        project_root,
-        with_agent=(service_id == AGENT_SERVICE_ID),
-        with_predictions=(service_id == PREDICTION_SERVICE_ID),
-    )
     try:
         spec = _spec_for_id(specs, service_id)
     except KeyError:
         print(f"[deploy] ERROR: unknown service {service_id!r}")
         raise SystemExit(1) from None
 
-    session = boto3.Session(region_name=region)
-    sts = session.client("sts")
-    ecs = session.client("ecs")
-    app_autoscaling = session.client("application-autoscaling")
-    ecr = session.client("ecr")
-    logs = session.client("logs")
+    app_autoscaling = session.client("application-autoscaling", config=_rc)
+    ecr = session.client("ecr", config=_rc)
+    logs = session.client("logs", config=_rc)
     account_id = sts.get_caller_identity()["Account"]
 
     alb_base = (base_url or "").rstrip("/")
@@ -652,7 +748,7 @@ def redeploy_single_service(
         nonlocal password
         db_host = (state.rds_endpoint or "").strip()
         if not db_host and state.rds_instance_id:
-            rds_client = session.client("rds")
+            rds_client = session.client("rds", config=_rc)
             inst = rds_client.describe_db_instances(
                 DBInstanceIdentifier=state.rds_instance_id
             )["DBInstances"][0]
@@ -898,9 +994,9 @@ def _finalize_analytics(
     if not args.with_analytics:
         return
     print("[deploy] --- Analytics ingestion (Streams -> Lambda -> S3) ---")
-    lambda_client = session.client("lambda")
+    lambda_client = session.client("lambda", config=BOTO_RETRY_CONFIG)
     enable_analytics_ingestion(
-        ddb=session.client("dynamodb"),
+        ddb=session.client("dynamodb", config=BOTO_RETRY_CONFIG),
         lambda_client=lambda_client,
         state=state,
         ordering_base_url=ordering_base_url,
@@ -1048,15 +1144,16 @@ def main() -> None:
             print(f"[deploy] ERROR: {e}")
             sys.exit(1)
         session = boto3.Session(region_name=region)
+        _rc = BOTO_RETRY_CONFIG
         run_teardown(
-            ec2=session.client("ec2"),
-            rds=session.client("rds"),
-            elbv2=session.client("elbv2"),
-            ecs=session.client("ecs"),
-            ecr=session.client("ecr"),
-            logs=session.client("logs"),
-            ddb=session.client("dynamodb"),
-            s3=session.client("s3"),
+            ec2=session.client("ec2", config=_rc),
+            rds=session.client("rds", config=_rc),
+            elbv2=session.client("elbv2", config=_rc),
+            ecs=session.client("ecs", config=_rc),
+            ecr=session.client("ecr", config=_rc),
+            logs=session.client("logs", config=_rc),
+            ddb=session.client("dynamodb", config=_rc),
+            s3=session.client("s3", config=_rc),
             state=state,
             region=region,
         )
@@ -1073,9 +1170,16 @@ def main() -> None:
             print(f"[deploy] ERROR: --resume requires {CONNECTION_ENV_PATH}")
             sys.exit(1)
         try:
-            state, deploy_region, base_url_from_conn = load_connection_env()
+            state, deploy_region, base_url_from_conn = load_connection_env(
+                require_ecs_services_when_cluster_set=False,
+            )
         except (FileNotFoundError, ValueError) as e:
             print(f"[deploy] ERROR: {e}")
+            sys.exit(1)
+        resume_errors = validate_resume_connection_env(state)
+        if resume_errors:
+            for msg in resume_errors:
+                print(f"[deploy] ERROR: {msg}")
             sys.exit(1)
         resume_pw = (os.environ.get("DIJKFOOD_DB_PASSWORD") or "").strip()
         if not resume_pw and state.cluster_name:
@@ -1118,17 +1222,17 @@ def main() -> None:
         sys.exit(1)
 
     session = boto3.Session(region_name=deploy_region)
-    ec2 = session.client("ec2")
-    rds = session.client("rds")
-    sts = session.client("sts")
-    elbv2 = session.client("elbv2")
-    ecs = session.client("ecs")
-    app_autoscaling = session.client("application-autoscaling")
-    ecr = session.client("ecr")
-    iam = session.client("iam")
-    logs = session.client("logs")
-    ddb = session.client("dynamodb")
-    s3 = session.client("s3")
+    ec2 = session.client("ec2", config=BOTO_RETRY_CONFIG)
+    rds = session.client("rds", config=BOTO_RETRY_CONFIG)
+    sts = session.client("sts", config=BOTO_RETRY_CONFIG)
+    elbv2 = session.client("elbv2", config=BOTO_RETRY_CONFIG)
+    ecs = session.client("ecs", config=BOTO_RETRY_CONFIG)
+    app_autoscaling = session.client("application-autoscaling", config=BOTO_RETRY_CONFIG)
+    ecr = session.client("ecr", config=BOTO_RETRY_CONFIG)
+    iam = session.client("iam", config=BOTO_RETRY_CONFIG)
+    logs = session.client("logs", config=BOTO_RETRY_CONFIG)
+    ddb = session.client("dynamodb", config=BOTO_RETRY_CONFIG)
+    s3 = session.client("s3", config=BOTO_RETRY_CONFIG)
 
     account_id = sts.get_caller_identity()["Account"]
 
@@ -1145,10 +1249,36 @@ def main() -> None:
         skip_agent_dynamo = args.resume and bool(state.dynamo_agent_sessions_table)
         skip_s3 = args.resume and bool(state.routing_graph_s3_bucket)
         skip_datalake = args.resume and bool(state.datalake_s3_bucket)
+
+        resume_specs = _service_specs(
+            project_root,
+            with_agent=args.with_agent,
+            with_predictions=args.with_predictions,
+        )
+        if args.resume and state.cluster_name and not state.ecs_services:
+            print(
+                "[deploy] --resume: ECS_SERVICES_JSON missing from connection.env; "
+                "attempting recovery from AWS"
+            )
+            if _hydrate_ecs_services_for_resume(
+                ecs=ecs,
+                elbv2=elbv2,
+                ec2=ec2,
+                state=state,
+                base_url=base_url_from_conn,
+                service_ids=tuple(str(s["id"]) for s in resume_specs),
+                specs=resume_specs,
+            ):
+                _snapshot_connection_env(
+                    state,
+                    base_url_from_conn,
+                    region=deploy_region,
+                )
+
         saved_ecs_records = list(state.ecs_services)
         ecs_rebuild_only = (
             args.resume
-            and bool(state.cluster_name)
+            and _resume_ecs_on_existing_alb(state, base_url_from_conn)
             and len(saved_ecs_records) > 0
         )
 
@@ -1258,6 +1388,12 @@ def main() -> None:
                 state.dynamo_courier_positions_arn,
                 state.dynamo_routes_arn,
             )
+        if not using_external_task_role and state.dynamo_predictions_arn:
+            attach_predictions_policy_to_task_role(
+                iam,
+                task_role_name,
+                state.dynamo_predictions_arn,
+            )
         if (
             not using_external_task_role
             and state.routing_graph_s3_bucket
@@ -1272,6 +1408,11 @@ def main() -> None:
             print(
                 "[deploy] TASK_ROLE_ARN set: add s3:GetObject, s3:PutObject, s3:HeadObject "
                 f"on arn:aws:s3:::{b}/* to your lab task role for routing graph cache."
+            )
+        if using_external_task_role and state.dynamo_predictions_arn:
+            print(
+                "[deploy] TASK_ROLE_ARN set: add dynamodb:PutItem and dynamodb:GetItem "
+                f"on {state.dynamo_predictions_arn} for delivery-time predictions."
             )
         if args.with_agent:
             _ensure_agent_dynamodb_and_iam(
@@ -1318,14 +1459,13 @@ def main() -> None:
                 "value": state.dynamo_routes_table or "",
             },
             ]
-            if args.with_predictions:
+            if state.dynamo_predictions_table:
                 env.append(
                     {
                         "name": "PREDICTION_BASE_URL",
                         "value": alb_base_url.rstrip("/"),
                     }
                 )
-            if state.dynamo_predictions_table:
                 env.append(
                     {
                         "name": "DYNAMODB_PREDICTIONS_TABLE",
@@ -1538,6 +1678,12 @@ def main() -> None:
                 f"python -m simulator.orchestration.load_sim --base-url {alb_base_url}"
             )
         else:
+            if args.resume and (state.alb_arn or state.listener_arn):
+                raise RuntimeError(
+                    "--resume: existing ALB found but ECS services could not be recovered. "
+                    "Ensure target groups exist for this deployment suffix, or run "
+                    "python deploy.py --teardown-only and deploy fresh."
+                )
             print("[deploy] --- Networking / ALB / ECS ---")
             alb_sg = create_alb_security_group(ec2, vpc_id, suffix, state)
             task_sg = create_ecs_task_security_group(ec2, vpc_id, alb_sg, suffix, state)

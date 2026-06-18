@@ -11,6 +11,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from agent import agent_functions
 from agent.aws_clients import bedrock_runtime_client
+from agent.bedrock_messages import sanitize_bedrock_messages
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def run_chat(
     if not tools:
         raise RuntimeError("No agent tools enabled; set AGENT_ENABLED_TOOLS or register stable tools")
 
-    working = list(messages)
+    working = sanitize_bedrock_messages(list(messages))
     working.append(_new_user_message(user_message))
     tools_used: list[dict[str, Any]] = []
     usage: dict[str, int] = {
@@ -135,6 +136,7 @@ def run_chat(
         if stop_reason == "tool_use":
             tool_uses = _extract_tool_uses(output_msg.get("content", []))
             if not tool_uses:
+                working.pop()
                 break
             tool_result_blocks: list[dict[str, Any]] = []
             for tu in tool_uses:
@@ -162,13 +164,13 @@ def run_chat(
 
         reply = _extract_text_blocks(output_msg.get("content", []))
         usage["tool_calls"] = len(tools_used)
-        return reply or "(No response text from model.)", working, tools_used, usage
+        return reply or "(No response text from model.)", sanitize_bedrock_messages(working), tools_used, usage
 
     reply = _extract_text_blocks(working[-1].get("content", [])) if working else ""
     usage["tool_calls"] = len(tools_used)
     return (
         reply or "I reached the maximum tool steps; please try a simpler question.",
-        working,
+        sanitize_bedrock_messages(working),
         tools_used,
         usage,
     )

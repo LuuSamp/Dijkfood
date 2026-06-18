@@ -8,6 +8,7 @@ import json
 
 from botocore.exceptions import ClientError
 
+from tools.aws_retry import describe_dynamodb_table
 from tools.state import DeploymentState
 
 TAG_PROJECT = "dijkfood-a1"
@@ -52,8 +53,8 @@ def create_dynamodb_tables(ddb, suffix: str, state: DeploymentState) -> tuple[st
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ResourceInUseException":
             raise
-        d = ddb.describe_table(TableName=order_logs)
-        arn1 = d["Table"]["TableArn"]
+        d = describe_dynamodb_table(ddb, order_logs)
+        arn1 = d["TableArn"]
         print(
             f"  [DynamoDB] Table {order_logs} exists "
             "(if schema changed vs. orderId+timestamp PK, delete the table or use a new suffix)"
@@ -79,8 +80,8 @@ def create_dynamodb_tables(ddb, suffix: str, state: DeploymentState) -> tuple[st
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ResourceInUseException":
             raise
-        d = ddb.describe_table(TableName=courier_pos)
-        arn2 = d["Table"]["TableArn"]
+        d = describe_dynamodb_table(ddb, courier_pos)
+        arn2 = d["TableArn"]
         print(
             f"  [DynamoDB] Table {courier_pos} exists "
             "(if schema changed, delete the table or use a new suffix)"
@@ -104,8 +105,8 @@ def create_dynamodb_tables(ddb, suffix: str, state: DeploymentState) -> tuple[st
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ResourceInUseException":
             raise
-        d = ddb.describe_table(TableName=routes)
-        arn3 = d["Table"]["TableArn"]
+        d = describe_dynamodb_table(ddb, routes)
+        arn3 = d["TableArn"]
         print(
             f"  [DynamoDB] Table {routes} exists "
             "(if schema changed, delete the table or use a new suffix)"

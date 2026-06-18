@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
+from numbers import Real
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 import boto3
 from batch_output import parse_batch_transform_body, parse_jsonl_body
@@ -28,6 +33,7 @@ class DeliveryTimeIn(BaseModel):
     hour: int = Field(ge=0, le=23)
     weekday: int = Field(ge=0, le=6)
     customer_id: int | None = None
+    distance_m: float = Field(default=0.0, ge=0)
 
 
 class DeliveryTimeOut(BaseModel):
@@ -68,10 +74,17 @@ def _invoke_endpoint(features: dict[str, Any]) -> float | None:
         )
         body = json.loads(resp["Body"].read().decode("utf-8"))
         if isinstance(body, dict) and "predicted_seconds" in body:
-            return float(body["predicted_seconds"])
+            val = body["predicted_seconds"]
+            if isinstance(val, list) and val:
+                val = val[0]
+            return float(val)
         if isinstance(body, list) and body:
-            return float(body[0])
-    except ClientError:
+            val = body[0]
+            if isinstance(val, dict) and "predicted_seconds" in val:
+                return float(val["predicted_seconds"])
+            return float(val)
+    except (ClientError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        log.warning("sagemaker invoke failed endpoint=%s: %s", ENDPOINT, exc)
         return None
     return None
 
@@ -82,22 +95,47 @@ def _heuristic(features: dict[str, Any]) -> float:
     if 11 <= hour <= 14 or 18 <= hour <= 21:
         base *= 1.2
     fp = int(features.get("food_place_id") or 0)
-    return base + (fp % 7) * 30.0
+    distance_m = float(features.get("distance_m") or 0.0)
+    return base + (fp % 7) * 30.0 + distance_m / 8.0
 
 
-def _persist_prediction(order_id: int, predicted_seconds: float, source: str) -> None:
+def _to_dynamo_safe(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Real):
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [_to_dynamo_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _to_dynamo_safe(v) for k, v in value.items()}
+    return value
+
+
+def _persist_prediction(
+    order_id: int,
+    predicted_seconds: float,
+    source: str,
+    *,
+    distance_m: float,
+    features: dict[str, Any],
+) -> None:
     if not PREDICTIONS_TABLE:
         return
     table = _ddb().Table(PREDICTIONS_TABLE)
     now = datetime.now(timezone.utc).isoformat()
-    table.put_item(
-        Item={
+    item = _to_dynamo_safe(
+        {
             "orderId": order_id,
             "predicted_seconds": predicted_seconds,
             "source": source,
+            "distance_m": distance_m,
+            "features": features,
             "updated_at": now,
         }
     )
+    table.put_item(Item=item)
 
 
 @app.get("/health")
@@ -115,13 +153,20 @@ def predict_delivery_time(body: DeliveryTimeIn) -> DeliveryTimeOut:
         "food_place_id": body.food_place_id,
         "hour": body.hour,
         "weekday": body.weekday,
+        "distance_m": body.distance_m,
     }
     predicted = _invoke_endpoint(features)
     source = "sagemaker"
     if predicted is None:
         predicted = _heuristic(features)
         source = "heuristic"
-    _persist_prediction(body.order_id, predicted, source)
+    _persist_prediction(
+        body.order_id,
+        predicted,
+        source,
+        distance_m=body.distance_m,
+        features=features,
+    )
     return DeliveryTimeOut(
         ok=True,
         order_id=body.order_id,
@@ -129,6 +174,18 @@ def predict_delivery_time(body: DeliveryTimeIn) -> DeliveryTimeOut:
         source=source,
         model_version=ENDPOINT or "heuristic",
     )
+
+
+def _from_dynamo_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, list):
+        return [_from_dynamo_safe(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _from_dynamo_safe(v) for k, v in value.items()}
+    return value
 
 
 @app.get("/prediction/v1/delivery-time/{order_id}")
@@ -139,7 +196,7 @@ def get_delivery_prediction(order_id: int) -> dict[str, Any]:
     item = table.get_item(Key={"orderId": order_id}).get("Item")
     if not item:
         raise HTTPException(404, detail="prediction not found")
-    return {"ok": True, **item}
+    return {"ok": True, **_from_dynamo_safe(item)}
 
 
 def _latest_s3_jsonl(prefix: str) -> list[dict[str, Any]]:

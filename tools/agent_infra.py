@@ -9,6 +9,7 @@ import os
 
 from botocore.exceptions import ClientError
 
+from tools.aws_retry import describe_dynamodb_table
 from tools.dynamodb_infra import TAG_PROJECT, _tag_table
 from tools.state import DeploymentState
 
@@ -34,8 +35,8 @@ def create_agent_sessions_table(ddb, suffix: str, state: DeploymentState) -> str
     except ClientError as exc:
         if exc.response["Error"]["Code"] != "ResourceInUseException":
             raise
-        d = ddb.describe_table(TableName=table_name)
-        arn = d["Table"]["TableArn"]
+        d = describe_dynamodb_table(ddb, table_name)
+        arn = d["TableArn"]
         print(f"  [DynamoDB] Table {table_name} exists")
     state.dynamo_agent_sessions_table = table_name
     state.dynamo_agent_sessions_arn = arn

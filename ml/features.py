@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +18,16 @@ STATUS_LABELS = {
 }
 
 GRID_SIZE_DEG = 0.01  # ~1 km at São Paulo latitude
+
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters between two WGS84 points."""
+    r = 6_371_000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def normalize_events(rows: list[dict[str, Any]]) -> pd.DataFrame:
@@ -54,7 +65,14 @@ def delivery_time_labels(events: pd.DataFrame) -> pd.DataFrame:
     return merged.reset_index()
 
 
-def delivery_features(events: pd.DataFrame) -> pd.DataFrame:
+def delivery_features(
+    events: pd.DataFrame,
+    *,
+    route_distances: dict[int, float] | None = None,
+    pair_distances: dict[tuple[int, int], float] | None = None,
+    customer_locations: dict[int, tuple[float, float]] | None = None,
+    food_place_locations: dict[int, tuple[float, float]] | None = None,
+) -> pd.DataFrame:
     """Feature rows for delivery-time model — one row per completed order."""
     labels = delivery_time_labels(events)
     if labels.empty:
@@ -75,8 +93,31 @@ def delivery_features(events: pd.DataFrame) -> pd.DataFrame:
     merged["hour"] = merged["timestamp"].dt.hour
     merged["weekday"] = merged["timestamp"].dt.dayofweek
     merged["food_place_id"] = merged["food_place_id"].fillna(0).astype(int)
+    merged["customer_id"] = merged["customer_id"].fillna(0).astype(int)
+
+    route_distances = route_distances or {}
+    pair_distances = pair_distances or {}
+    customer_locations = customer_locations or {}
+    food_place_locations = food_place_locations or {}
+
+    def _resolve_distance(row: pd.Series) -> float:
+        oid = int(row["order_id"])
+        if oid in route_distances:
+            return float(route_distances[oid])
+        fp = int(row["food_place_id"])
+        cid = int(row["customer_id"])
+        pair_key = (fp, cid)
+        if pair_key in pair_distances:
+            return float(pair_distances[pair_key])
+        fp_loc = food_place_locations.get(fp)
+        cust_loc = customer_locations.get(cid)
+        if fp_loc is not None and cust_loc is not None:
+            return haversine_m(fp_loc[0], fp_loc[1], cust_loc[0], cust_loc[1])
+        return 0.0
+
+    merged["distance_m"] = merged.apply(_resolve_distance, axis=1)
     return merged[
-        ["order_id", "food_place_id", "hour", "weekday", "delivery_seconds"]
+        ["order_id", "food_place_id", "hour", "weekday", "distance_m", "delivery_seconds"]
     ]
 
 
@@ -144,4 +185,5 @@ def heuristic_delivery_seconds(features: dict[str, Any], historical_mean: float 
     if 11 <= hour <= 14 or 18 <= hour <= 21:
         base *= 1.2
     fp = int(features.get("food_place_id") or 0)
-    return base + (fp % 7) * 30.0
+    distance_m = float(features.get("distance_m") or 0.0)
+    return base + (fp % 7) * 30.0 + distance_m / 8.0

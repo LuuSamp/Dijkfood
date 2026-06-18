@@ -7,9 +7,11 @@ import io
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import boto3
 import pandas as pd
+import psycopg
 from dotenv import load_dotenv
 
 from ml.features import (
@@ -55,6 +57,80 @@ def _upload_csv(s3, bucket: str, key: str, df: pd.DataFrame) -> None:
     print(f"  uploaded s3://{bucket}/{key} ({len(df)} rows)")
 
 
+def _db_conninfo() -> str:
+    return (
+        f"host={os.environ.get('DB_HOST', '')} "
+        f"port={os.environ.get('DB_PORT', '5432')} "
+        f"dbname={os.environ.get('DB_NAME', '')} "
+        f"user={os.environ.get('DB_USER', '')} "
+        f"password={os.environ.get('DB_PASSWORD', '')} "
+        "connect_timeout=10"
+    )
+
+
+def _load_rds_locations() -> tuple[dict[int, tuple[float, float]], dict[int, tuple[float, float]]]:
+    """customer_id / food_place_id -> (lat, lon) from RDS."""
+    customers: dict[int, tuple[float, float]] = {}
+    food_places: dict[int, tuple[float, float]] = {}
+    if not os.environ.get("DB_HOST"):
+        return customers, food_places
+    try:
+        with psycopg.connect(_db_conninfo()) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT customer_id, lat, lon FROM customers")
+                for row in cur.fetchall():
+                    customers[int(row[0])] = (float(row[1]), float(row[2]))
+                cur.execute("SELECT food_place_id, lat, lon FROM food_places")
+                for row in cur.fetchall():
+                    food_places[int(row[0])] = (float(row[1]), float(row[2]))
+    except Exception as exc:
+        print(f"  WARNING: could not load RDS locations for distance fallback: {exc}")
+    return customers, food_places
+
+
+def _load_route_distances(
+    ddb,
+    table_name: str,
+) -> tuple[dict[int, float], dict[tuple[int, int], float]]:
+    """Scan DynamoDB routes for order# and pair# distance_m values."""
+    order_distances: dict[int, float] = {}
+    pair_distances: dict[tuple[int, int], float] = {}
+    if not table_name:
+        return order_distances, pair_distances
+    table = ddb.Table(table_name)
+    last_key: dict[str, Any] | None = None
+    while True:
+        scan_kwargs: dict[str, Any] = {
+            "ProjectionExpression": "routeKey, payload",
+        }
+        if last_key is not None:
+            scan_kwargs["ExclusiveStartKey"] = last_key
+        resp = table.scan(**scan_kwargs)
+        for item in resp.get("Items", []):
+            route_key = str(item.get("routeKey") or "")
+            payload = item.get("payload") or {}
+            distance_m = payload.get("distance_m")
+            if distance_m is None:
+                continue
+            dist = float(distance_m)
+            if route_key.startswith("order#"):
+                try:
+                    order_distances[int(route_key.split("#", 1)[1])] = dist
+                except ValueError:
+                    continue
+            elif route_key.startswith("pair#"):
+                parts = route_key.split("#")
+                if len(parts) == 3:
+                    try:
+                        pair_distances[(int(parts[1]), int(parts[2]))] = dist
+                    except ValueError:
+                        continue
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+    return order_distances, pair_distances
+
+
 def prepare_all(*, bucket: str | None = None) -> dict[str, int]:
     _load_env()
     bucket = bucket or os.environ.get("DATALAKE_S3_BUCKET", "").strip()
@@ -67,7 +143,23 @@ def prepare_all(*, bucket: str | None = None) -> dict[str, int]:
         print("No events found in datalake; run load test first.")
         return {"delivery": 0, "demand": 0, "anomaly": 0}
 
-    delivery_df = delivery_features(events)
+    routes_table = (os.environ.get("DYNAMODB_ROUTES_TABLE") or "").strip()
+    ddb = boto3.resource("dynamodb", region_name=region)
+    order_distances, pair_distances = _load_route_distances(ddb, routes_table)
+    customer_locations, food_place_locations = _load_rds_locations()
+    if order_distances or pair_distances:
+        print(
+            f"  route distances: {len(order_distances)} orders, "
+            f"{len(pair_distances)} pairs from DynamoDB"
+        )
+
+    delivery_df = delivery_features(
+        events,
+        route_distances=order_distances,
+        pair_distances=pair_distances,
+        customer_locations=customer_locations,
+        food_place_locations=food_place_locations,
+    )
     demand_df = demand_features(events)
     anomaly_df = anomaly_features(events)
 

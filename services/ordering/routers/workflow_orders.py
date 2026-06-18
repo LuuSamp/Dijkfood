@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -99,6 +100,16 @@ def _clear_dynamo_table_by_keys(table: Any, *, key_names: list[str]) -> int:
     return deleted
 
 
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in meters between two WGS84 points."""
+    r = 6_371_000.0
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
 def _latest_position_by_courier(courier_id: int) -> tuple[float, float] | None:
     """
     Latest lat/lon from Dynamo courier-positions (sort key = timestamp ms, descending).
@@ -129,11 +140,12 @@ def _dispatch_delivery_prediction(
     order_id: int,
     food_place_id: int,
     customer_id: int,
+    distance_m: float,
 ) -> None:
     base = (os.environ.get("PREDICTION_BASE_URL") or "").strip().rstrip("/")
     if not base:
         return
-    timeout_s = float(os.environ.get("PLACE_ORDER_PREDICTION_TIMEOUT_S", "0.3"))
+    timeout_s = float(os.environ.get("PLACE_ORDER_PREDICTION_TIMEOUT_S", "5.0"))
     now = dt.datetime.now(dt.timezone.utc)
 
     def _job() -> None:
@@ -143,6 +155,7 @@ def _dispatch_delivery_prediction(
             "customer_id": customer_id,
             "hour": now.hour,
             "weekday": now.weekday(),
+            "distance_m": distance_m,
         }
         url = f"{base}/prediction/v1/delivery-time"
         try:
@@ -155,13 +168,14 @@ def _dispatch_delivery_prediction(
             with urllib.request.urlopen(req, timeout=timeout_s) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
             log.info(
-                "delivery prediction order_id=%s seconds=%s source=%s",
+                "delivery prediction order_id=%s seconds=%s source=%s distance_m=%.1f",
                 order_id,
                 body.get("predicted_seconds"),
                 body.get("source"),
+                distance_m,
             )
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            log.debug("delivery prediction skipped order_id=%s: %s", order_id, exc)
+            log.warning("delivery prediction skipped order_id=%s: %s", order_id, exc)
 
     threading.Thread(
         target=_job,
@@ -264,6 +278,12 @@ def _dispatch_route_calculation(
                 (time.perf_counter() - t0) * 1000.0,
                 attempts,
             )
+            _dispatch_delivery_prediction(
+                order_id=order_id,
+                food_place_id=food_place_id,
+                customer_id=customer_id,
+                distance_m=distance_m,
+            )
         except RoutingClientError as exc:
             _update_route_status("error", str(exc))
             log.warning(
@@ -273,9 +293,27 @@ def _dispatch_route_calculation(
                 attempts,
                 exc,
             )
+            fallback_distance = _haversine_m(
+                origin_lat, origin_lng, destination_lat, destination_lng
+            )
+            _dispatch_delivery_prediction(
+                order_id=order_id,
+                food_place_id=food_place_id,
+                customer_id=customer_id,
+                distance_m=fallback_distance,
+            )
         except Exception as exc:
             _update_route_status("error", f"{type(exc).__name__}: {exc}")
             log.exception("async route worker crashed order_id=%s", order_id)
+            fallback_distance = _haversine_m(
+                origin_lat, origin_lng, destination_lat, destination_lng
+            )
+            _dispatch_delivery_prediction(
+                order_id=order_id,
+                food_place_id=food_place_id,
+                customer_id=customer_id,
+                distance_m=fallback_distance,
+            )
 
     threading.Thread(
         target=_job,
@@ -335,11 +373,6 @@ def place_order(
         origin_lng=float(food_place["lon"]),
         destination_lat=float(customer["lat"]),
         destination_lng=float(customer["lon"]),
-    )
-    _dispatch_delivery_prediction(
-        order_id=order_id,
-        food_place_id=body.food_place_id,
-        customer_id=body.customer_id,
     )
 
     log_table = get_order_logs_table()

@@ -738,6 +738,120 @@ def _delete_ecr_repo(ecr, repo_name: str) -> None:
         print(f"  [teardown] ECR {repo_name}: {exc.response['Error']['Code']}")
 
 
+def discover_ecs_service_records(
+    ecs,
+    *,
+    cluster_name: str,
+    suffix: str,
+) -> list[EcsServiceRecord]:
+    """Rebuild ECS_SERVICES_JSON entries from live ECS services in the cluster."""
+    prefix = "dijkfood-"
+    suffix_suffix = f"-{suffix}"
+    service_arns: list[str] = []
+    paginator = ecs.get_paginator("list_services")
+    for page in paginator.paginate(cluster=cluster_name):
+        service_arns.extend(page.get("serviceArns") or [])
+
+    records: list[EcsServiceRecord] = []
+    for i in range(0, len(service_arns), 10):
+        batch = service_arns[i : i + 10]
+        resp = ecs.describe_services(cluster=cluster_name, services=batch)
+        for svc in resp.get("services") or []:
+            if svc.get("status") == "INACTIVE":
+                continue
+            name = str(svc.get("serviceName") or "")
+            if not name.startswith(prefix) or not name.endswith(suffix_suffix):
+                continue
+            service_id = name[len(prefix) : -len(suffix_suffix)]
+            if not service_id:
+                continue
+            load_balancers = svc.get("loadBalancers") or []
+            tg_arn = ""
+            if load_balancers:
+                tg_arn = str(load_balancers[0].get("targetGroupArn") or "")
+            task_def_arn = str(svc.get("taskDefinition") or "")
+            family = f"dijkfood-{service_id}-{suffix}"
+            log_group = f"/ecs/dijkfood-{service_id}-{suffix}"
+            ecr_repo = f"dijkfood-{service_id}-{suffix}"
+            if task_def_arn:
+                td = ecs.describe_task_definition(taskDefinition=task_def_arn)[
+                    "taskDefinition"
+                ]
+                family = str(td.get("family") or family)
+                for container in td.get("containerDefinitions") or []:
+                    image = str(container.get("image") or "")
+                    if image:
+                        ecr_repo = image.split("/")[-1].rsplit(":", 1)[0]
+                    log_cfg = container.get("logConfiguration") or {}
+                    if log_cfg.get("logDriver") == "awslogs":
+                        opts = log_cfg.get("options") or {}
+                        log_group = str(opts.get("awslogs-group") or log_group)
+                    break
+            records.append(
+                EcsServiceRecord(
+                    service_id=service_id,
+                    service_name=name,
+                    ecr_repo_name=ecr_repo,
+                    task_definition_family=family,
+                    target_group_arn=tg_arn,
+                    log_group_name=log_group,
+                )
+            )
+    return records
+
+
+def discover_target_groups_by_service_id(
+    elbv2,
+    *,
+    vpc_id: str,
+    suffix: str,
+    service_ids: tuple[str, ...],
+) -> dict[str, str]:
+    """Map service_id -> target group ARN using naming convention from deploy."""
+    mapping: dict[str, str] = {}
+    for sid in service_ids:
+        tg_name = _target_group_name(suffix, sid)
+        try:
+            groups = elbv2.describe_target_groups(Names=[tg_name]).get("TargetGroups") or []
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "TargetGroupNotFound":
+                continue
+            raise
+        if not groups:
+            continue
+        tg = groups[0]
+        if tg.get("VpcId") == vpc_id:
+            mapping[sid] = str(tg["TargetGroupArn"])
+    return mapping
+
+
+def synthesize_ecs_service_records(
+    *,
+    suffix: str,
+    specs: list[dict[str, object]],
+    target_group_arns: dict[str, str],
+) -> list[EcsServiceRecord]:
+    """Build ECS service records when target groups exist but ECS services do not."""
+    records: list[EcsServiceRecord] = []
+    for spec in specs:
+        sid = str(spec["id"])
+        tg_arn = target_group_arns.get(sid)
+        if not tg_arn:
+            continue
+        ecr_suffix = str(spec.get("ecr_suffix") or sid)
+        records.append(
+            EcsServiceRecord(
+                service_id=sid,
+                service_name=f"dijkfood-{sid}-{suffix}",
+                ecr_repo_name=f"dijkfood-{ecr_suffix}-{suffix}",
+                task_definition_family=f"dijkfood-{sid}-{suffix}",
+                target_group_arn=tg_arn,
+                log_group_name=f"/ecs/dijkfood-{sid}-{suffix}",
+            )
+        )
+    return records
+
+
 def destroy_ecs_stack(
     ecs,
     elbv2,
